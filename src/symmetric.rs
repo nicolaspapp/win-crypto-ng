@@ -35,7 +35,7 @@
 //!
 //! let algo = SymmetricAlgorithm::open(SymmetricAlgorithmId::Aes, ChainingMode::Cbc).unwrap();
 //! let key = algo.new_key(KEY.as_bytes()).unwrap();
-//! let ciphertext = key.encrypt(Some(&mut iv.clone()), DATA.as_bytes(), Some(Padding::Block)).unwrap();
+//! let ciphertext = key.encrypt(Some(&mut iv.clone()), DATA.as_bytes(), Some(Padding::Block), None).unwrap();
 //! let plaintext = key.decrypt(Some(&mut iv.clone()), ciphertext.as_slice(), Some(Padding::Block)).unwrap();
 //!
 //! assert_eq!(std::str::from_utf8(&plaintext.as_slice()[..DATA.len()]).unwrap(), DATA);
@@ -55,6 +55,44 @@ use std::mem::MaybeUninit;
 use std::ptr::null_mut;
 use winapi::shared::bcrypt::*;
 use winapi::shared::minwindef::{PUCHAR, ULONG};
+use winapi::um::winnt::VOID;
+use winapi::shared::ntdef::ULONGLONG;
+
+// For authenticated encryption modes
+#[derive(Debug, Clone, PartialOrd, PartialEq)]
+pub struct AuthenticatedCipherModeInfo {
+    pub nonce: Option<Vec<u8>>,
+    pub auth_data: Option<Vec<u8>>,
+    pub tag: Option<Vec<u8>>,
+    pub mac_context: Option<Vec<u8>>,
+    pub aad_size: ULONG,
+    pub data_size: ULONGLONG,
+    pub flags: ULONG,
+}
+
+impl AuthenticatedCipherModeInfo {
+    pub fn to_bcrypt_struct(&self) -> BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
+        BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
+            cbSize: std::mem::size_of::<BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO>() as u32,
+            dwInfoVersion: BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION,
+            pbNonce: self.nonce.as_ref().map_or(null_mut(), |v| v.as_ptr() as PUCHAR),
+            cbNonce: self.nonce.as_ref().map_or(0, |v| v.len() as ULONG),
+            pbAuthData: self.auth_data.as_ref().map_or(null_mut(), |v| v.as_ptr() as PUCHAR),
+            cbAuthData: self.auth_data.as_ref().map_or(0, |v| v.len() as ULONG),
+            pbTag:  self.tag.as_ref().map_or(null_mut(), |v| v.as_ptr() as PUCHAR),
+            cbTag: self.tag.as_ref().map_or(0, |v| v.len() as ULONG),
+            pbMacContext: self.mac_context.as_ref().map_or(null_mut(), |v| v.as_ptr() as PUCHAR),
+            cbMacContext: self.mac_context.as_ref().map_or(0, |v| v.len() as ULONG),
+            cbAAD: self.aad_size,
+            cbData: self.data_size,
+            dwFlags: self.flags,
+        }
+    }
+
+    pub fn as_ptr(&self) -> *const BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
+        &self.to_bcrypt_struct()
+    }
+}
 
 /// Symmetric algorithm identifiers
 #[derive(Debug, Clone, Copy, PartialOrd, PartialEq)]
@@ -136,7 +174,7 @@ pub enum ChainingMode {
     // Standard: SP800-38D
     //
     // **Windows Vista**: This value is supported beginning with Windows Vista with SP1.
-    //Gcm,
+    Gcm,
 }
 
 impl ChainingMode {
@@ -146,7 +184,7 @@ impl ChainingMode {
             Self::Cbc => BCRYPT_CHAIN_MODE_CBC,
             Self::Cfb => BCRYPT_CHAIN_MODE_CFB,
             //Self::Ccm => BCRYPT_CHAIN_MODE_CCM,
-            //Self::Gcm => BCRYPT_CHAIN_MODE_GCM,
+            Self::Gcm => BCRYPT_CHAIN_MODE_GCM,
         }
     }
 }
@@ -529,7 +567,7 @@ impl SymmetricAlgorithmKey {
     /// let key = algo.new_key("0123456789ABCDEF".as_bytes()).unwrap();
     /// let mut iv = b"_THIS_IS_THE_IV_".to_vec();
     /// let plaintext = "THIS_IS_THE_DATA".as_bytes();
-    /// let ciphertext = key.encrypt(Some(&mut iv), plaintext, Some(Padding::Block)).unwrap();
+    /// let ciphertext = key.encrypt(Some(&mut iv), plaintext, Some(Padding::Block), None).unwrap();
     ///
     /// assert_eq!(ciphertext.as_slice(), [
     ///     0xE4, 0xD9, 0x90, 0x64, 0xA6, 0xA6, 0x5F, 0x7E,
@@ -542,6 +580,7 @@ impl SymmetricAlgorithmKey {
         iv: Option<&mut [u8]>,
         data: &[u8],
         padding: Option<Padding>,
+        authenticated_padding_info: Option<AuthenticatedCipherModeInfo>,
     ) -> Result<Buffer> {
         let (iv_ptr, iv_len) = iv
             .map(|iv| (iv.as_mut_ptr(), iv.len() as ULONG))
@@ -554,6 +593,8 @@ impl SymmetricAlgorithmKey {
 
         let mut encrypted_len = MaybeUninit::<ULONG>::uninit();
         unsafe {
+            let padding_info = authenticated_padding_info.as_ref().map_or(null_mut(), |info| info.as_ptr() as *mut VOID);
+
             Error::check(BCryptEncrypt(
                 self.handle.as_ptr(),
                 data.as_ptr() as PUCHAR,
@@ -573,7 +614,7 @@ impl SymmetricAlgorithmKey {
                 self.handle.as_ptr(),
                 data.as_ptr() as PUCHAR,
                 data.len() as ULONG,
-                null_mut(),
+                padding_info,
                 iv_ptr,
                 iv_len,
                 output.as_mut_ptr(),
@@ -895,6 +936,35 @@ mod tests {
     }
 
     #[test]
+    fn aes_gcm() {
+        // Check specific Aes chaining modes
+        let key_size: usize = 32;
+        let block_size = 12;
+        let buffer = vec![0u8; 16];
+        let mut iv_buffer = vec![0u8; block_size];
+        let authenticated_padding_info = AuthenticatedCipherModeInfo {
+            nonce: Some(IV.as_bytes()[..block_size].to_vec()),
+            auth_data: None,
+            tag: Some(buffer),
+            mac_context: Some(vec![0u8; 16]),
+            aad_size: 0,
+            data_size: 0,
+            flags: 0,
+        };
+        
+        check_encryption_decryption(
+            SymmetricAlgorithmId::Aes,
+            ChainingMode::Gcm,
+            &SECRET.as_bytes()[..key_size],
+            Some(iv_buffer.as_mut()),
+            &DATA.as_bytes(),
+            block_size,
+            None,
+            Some(authenticated_padding_info),
+        );
+    }
+
+    #[test]
     fn des() {
         check_common_chaining_modes(SymmetricAlgorithmId::Des, 8, 8);
     }
@@ -945,6 +1015,8 @@ mod tests {
             None,
             &DATA.as_bytes()[..block_size],
             block_size,
+            None,
+            None,
         );
         check_encryption_decryption(
             algo_id,
@@ -953,6 +1025,8 @@ mod tests {
             Some(IV.as_bytes()[..block_size].to_vec().as_mut()),
             &DATA.as_bytes(),
             block_size,
+            None,
+            None,
         );
         check_encryption_decryption(
             algo_id,
@@ -961,6 +1035,8 @@ mod tests {
             Some(IV.as_bytes()[..block_size].to_vec().as_mut()),
             &DATA.as_bytes(),
             block_size,
+            None,
+            None,
         );
     }
 
@@ -971,18 +1047,18 @@ mod tests {
         iv: Option<&mut [u8]>,
         data: &[u8],
         expected_block_size: usize,
+        padding: Option<Padding>,
+        authenticated_padding_info: Option<AuthenticatedCipherModeInfo>,
     ) {
         let iv_cloned = || iv.as_ref().map(|x| x.to_vec());
         let algo = SymmetricAlgorithm::open(algo_id, chaining_mode).unwrap();
         let key = algo.new_key(secret).unwrap();
-        let ciphertext = key
-            .encrypt(iv_cloned().as_mut().map(|x| x.as_mut()), data, None)
-            .unwrap();
+        let ciphertext = key.encrypt(iv_cloned().as_mut().map(|x| x.as_mut()), data, padding, authenticated_padding_info).unwrap();
         let plaintext = key
             .decrypt(
                 iv_cloned().as_mut().map(|x| x.as_mut()),
                 ciphertext.as_slice(),
-                None,
+                padding,
             )
             .unwrap();
 
