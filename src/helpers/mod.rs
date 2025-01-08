@@ -11,6 +11,8 @@ mod blob;
 pub use blob::{Blob, BlobLayout};
 mod windows_string;
 pub use windows_string::WindowsString;
+mod aead;
+pub use aead::AuthenticatedCipherModeInfo;
 
 pub trait Handle: Send {
     fn as_ptr(&self) -> BCRYPT_HANDLE;
