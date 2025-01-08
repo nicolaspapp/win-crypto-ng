@@ -7,7 +7,7 @@ use std::fmt::{Debug, Error, Formatter};
 /// On creation, the buffer is initialized with zeroes.
 /// On destruction, if the `zeroize` feature is enabled, its content is set to
 /// `0` before being released.
-#[derive(PartialOrd, PartialEq)]
+#[derive(PartialOrd, PartialEq, Clone)]
 pub struct Buffer {
     inner: Vec<u8>,
 }
