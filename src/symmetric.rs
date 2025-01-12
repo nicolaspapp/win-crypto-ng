@@ -1040,11 +1040,10 @@ mod tests {
         println!("AuthTagLength: {:?}, {:?}", auth_tag_length.dwMinLength, auth_tag_length.dwMaxLength);
         let tag_buffer = vec![0u8; auth_tag_length.dwMinLength as usize];
         let mac_buffer = vec![0u8; auth_tag_length.dwMaxLength as usize];
-        let iv_buffer = vec![0u8; nonce_size as usize];
         println!("IV Buffer: {:?}", nonce_size);
 
         let authenticated_padding_info = AuthenticatedCipherModeInfo {
-            nonce: Some(Buffer::from_vec(iv_buffer)),
+            nonce: Some(Buffer::from_vec(IV.as_bytes()[..nonce_size].to_vec())),
             auth_data: None,
             tag: Some(Buffer::from_vec(tag_buffer)),
             mac_context:Some(Buffer::from_vec(mac_buffer)),
