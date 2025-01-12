@@ -38,4 +38,38 @@ impl AuthenticatedCipherModeInfo {
     pub fn as_box(&self) -> Box<BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO> {
         return Box::new(self.to_bcrypt_struct())
     }
+
+    pub fn from_boxed(&self, bcrypt_info: Box<BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO>) -> Self {
+        Self {
+            nonce: if bcrypt_info.pbNonce.is_null() {
+                None
+            } else {
+                Some(Buffer::from(unsafe { std::slice::from_raw_parts(bcrypt_info.pbNonce as *const u8, bcrypt_info.cbNonce as usize) }))
+            },
+            auth_data: if bcrypt_info.pbAuthData.is_null() {
+                None
+            } else {
+                Some(Buffer::from(unsafe { std::slice::from_raw_parts(bcrypt_info.pbAuthData as *const u8, bcrypt_info.cbAuthData as usize) }))
+            },
+            tag: if bcrypt_info.pbTag.is_null() {
+                None
+            } else {
+                Some(Buffer::from(unsafe { std::slice::from_raw_parts(bcrypt_info.pbTag as *const u8, bcrypt_info.cbTag as usize) }))
+            },
+            mac_context: if bcrypt_info.pbMacContext.is_null() {
+                None
+            } else {
+                Some(Buffer::from(unsafe { std::slice::from_raw_parts(bcrypt_info.pbMacContext as *const u8, bcrypt_info.cbMacContext as usize) }))
+            },
+            aad_size: bcrypt_info.cbAAD,
+            data_size: bcrypt_info.cbData,
+            flags: bcrypt_info.dwFlags,
+        }
+    }
+
+    pub fn update_from_raw(&mut self, data: *mut winapi::ctypes::c_void) {
+        let bcrypt_info = unsafe { Box::from_raw(data as *mut BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO) };
+        *self = self.from_boxed(bcrypt_info);
+    }
+    
 }

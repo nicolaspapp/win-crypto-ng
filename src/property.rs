@@ -195,3 +195,16 @@ impl Property for DhParameters {
     // TODO: Replace with appropriate blob type
     type Value = [u8];
 }
+
+// [**BCRYPT_AUTH_TAG_LENGTH**] (https://docs.microsoft.com/windows/win32/seccng/cng-property-identifiers#BCRYPT_AUTH_TAG_LENGTH)
+///
+/// `L"AuthTagLength"`
+///
+/// The authentication tag lengths that are supported by the algorithm.
+/// This property is a BCRYPT_AUTH_TAG_LENGTHS_STRUCT structure.
+/// This property only applies to algorithms.
+pub enum AuthTagLength {}
+impl Property for AuthTagLength {
+    const IDENTIFIER: &'static str = bcrypt::BCRYPT_AUTH_TAG_LENGTH;
+    type Value = bcrypt::BCRYPT_AUTH_TAG_LENGTHS_STRUCT;
+}
