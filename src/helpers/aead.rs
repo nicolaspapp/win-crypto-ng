@@ -88,7 +88,7 @@ impl AuthenticatedCipherModeInfo {
         }
     }
 
-    pub fn update_from_raw(&mut self, data: *mut winapi::ctypes::c_void) {
+    pub fn update_from_raw(&mut self, data: *mut BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO) {
         let bcrypt_info = unsafe { Box::from_raw(data as *mut BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO) };
         *self = self.from_boxed(bcrypt_info);
     }

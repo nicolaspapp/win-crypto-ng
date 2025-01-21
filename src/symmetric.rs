@@ -672,14 +672,14 @@ impl SymmetricAlgorithmKey {
             .unwrap_or((null_mut(), 0));
 
         let padding_info_box = authenticated_padding_info.as_box();
-        let padding_info: *mut winapi::ctypes::c_void = Box::into_raw(padding_info_box) as *mut VOID;
+        let padding_info = Box::into_raw(padding_info_box);
         
         unsafe {
             Error::check(BCryptEncrypt(
                 self.handle.as_ptr(),
                 data.as_ptr() as PUCHAR,
                 data.len() as ULONG,
-                padding_info,
+                padding_info  as *mut VOID,
                 iv_ptr,
                 iv_len,
                 null_mut(),
@@ -693,7 +693,7 @@ impl SymmetricAlgorithmKey {
                 self.handle.as_ptr(),
                 data.as_ptr() as PUCHAR,
                 data.len() as ULONG,
-                padding_info,
+                padding_info  as *mut VOID,
                 iv_ptr,
                 iv_len,
                 output.as_mut_ptr(),
@@ -704,7 +704,6 @@ impl SymmetricAlgorithmKey {
             .map(|_| output);
             
             authenticated_padding_info.update_from_raw(padding_info);
-            drop(Box::from_raw(padding_info));
             result
         }
     }
@@ -867,7 +866,7 @@ impl SymmetricAlgorithmKey {
             .map(|iv| (iv.as_mut_ptr(), iv.len() as ULONG))
             .unwrap_or((null_mut(), 0));
         let mut plaintext_len = MaybeUninit::<ULONG>::uninit();
-        let padding_info = Box::into_raw(authenticated_padding_info.as_box()) as *mut VOID;
+        let padding_info: *mut BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO = Box::into_raw(authenticated_padding_info.as_box());
         unsafe {
             Error::check(BCryptDecrypt(
                 self.handle.as_ptr(),
@@ -888,7 +887,7 @@ impl SymmetricAlgorithmKey {
                 self.handle.as_ptr(),
                 data.as_ptr() as PUCHAR,
                 data.len() as ULONG,
-                padding_info,
+                padding_info as *mut VOID,
                 iv_ptr,
                 iv_len,
                 output.as_mut_ptr(),
@@ -899,7 +898,6 @@ impl SymmetricAlgorithmKey {
             .map(|_| output);
 
             authenticated_padding_info.update_from_raw(padding_info);
-            drop(Box::from_raw(padding_info));
 
             result
         }
