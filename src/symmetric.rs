@@ -586,14 +586,91 @@ impl SymmetricAlgorithmKey {
     }
 
     /// Encrypts data using the symmetric key
-    /// This function is used for AEAD ciphers.
-    /// Use only if you are encrypting an individual block.
+    /// This function is used for AEAD ciphers [`ChainingMode::Gcm`]. Allows also chained calls.
+    /// 
+    /// 
+    /// The IV is only needed when doing chaned calls. If not doing chained calls, `None` should be used.
+    /// For chained calls input must be a multiple of the block size of the cipher. If the data lenght does not
+    /// match the block size of the cipher, make sure it is the final block of the data.
+    ///
+    /// # Examples
+    ///
+    /// 1. Encrypting and decrypting data using [`ChainingMode::Gcm`] in a single call:
+    /// ```
+    /// # use win_crypto_ng::symmetric::{ChainingMode, SymmetricAlgorithm, SymmetricAlgorithmId};
+    /// # use win_crypto_ng::symmetric::Padding;
+    /// # use win_crypto_ng::buffer::Buffer;
+    /// # use win_crypto_ng::helpers::AuthenticatedCipherModeInfo;
+    /// # let algo = SymmetricAlgorithm::open(SymmetricAlgorithmId::Aes, ChainingMode::Gcm).unwrap();
+    /// let key = algo.new_key("0123456789ABCDEF".as_bytes()).unwrap();
+    /// let mut iv = b"_THIS_IS_THE_IV_".to_vec();
+    /// let plaintext = "THIS_IS_THE_DATA".as_bytes();
+    /// let mut authenticated_padding_info = AuthenticatedCipherModeInfo::new(
+    ///    Buffer::from_vec(iv),
+    ///    Some(Buffer::from_vec(vec![0u8; 16])),
+    ///    None,
+    ///    false);
+    /// let ciphertext = key.aead_encrypt(None, plaintext, &mut authenticated_padding_info).unwrap();
+    /// let decrypted  = key.aead_decrypt(None, ciphertext.as_slice(), &mut authenticated_padding_info).unwrap();
+    /// 
+    /// assert_eq!(plaintext, decrypted.as_slice());
+    /// ```
+    /// 
+    /// 2. Encrypting and decrypting data using [`ChainingMode::Gcm`] in a chained call:
+    /// ```
+    /// # use winapi::shared::bcrypt::BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
+    /// # use win_crypto_ng::symmetric::{ChainingMode, SymmetricAlgorithm, SymmetricAlgorithmId};
+    /// # use win_crypto_ng::symmetric::Padding;
+    /// # use win_crypto_ng::buffer::Buffer;
+    /// # use win_crypto_ng::helpers::AuthenticatedCipherModeInfo;
+    /// let algo = SymmetricAlgorithm::open(SymmetricAlgorithmId::Aes, ChainingMode::Gcm).unwrap();
+    /// let key = algo.new_key("0123456789ABCDEF".as_bytes()).unwrap();
+    /// let iv = b"_THIS_IS_THE_IV_".to_vec();
+    /// let plaintext = "THIS_IS_THE_DATA___ALSO_THIS_IS_THE_DATA".as_bytes();
+    /// let mut authenticated_padding_info = AuthenticatedCipherModeInfo::new(
+    ///    Buffer::from_vec(iv.clone()),
+    ///    Some(Buffer::from_vec(vec![0u8; 16])),
+    ///    None,
+    ///    true);
+    /// 
+    /// // Track context iv (GCM updates iv on each call)
+    /// let mut context_iv = iv.clone();
+    /// 
+    /// let first_part = key.aead_encrypt(Some(context_iv.as_mut_slice()), &plaintext[0..16], &mut authenticated_padding_info).unwrap();
+    /// // Set this before the last call
+    /// authenticated_padding_info.flags &= !BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
+    /// let second_part = key.aead_encrypt(Some(context_iv.as_mut_slice()), &plaintext[16..], &mut authenticated_padding_info).unwrap();
+    ///
+    /// // We need the previous tag result to decrypt
+    /// let mut decrypt_authenticated_padding_info = AuthenticatedCipherModeInfo::new(
+    ///    Buffer::from_vec(iv.clone()),
+    ///    authenticated_padding_info.tag.clone(),
+    ///    None,
+    ///    true);
+    /// // Reset context to original iv
+    /// context_iv = iv.clone();
+    /// let decrypted_first_part  = key.aead_decrypt(Some(context_iv.as_mut_slice()), first_part.as_slice(), &mut decrypt_authenticated_padding_info).unwrap();
+    /// // Set this before the last call
+    /// decrypt_authenticated_padding_info.flags &= !BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
+    /// let decrypted_second_part  = key.aead_decrypt(Some(context_iv.as_mut_slice()), second_part.as_slice(), &mut decrypt_authenticated_padding_info).unwrap();
+    ///
+    /// // Join the decrypted data
+    /// let mut decrypted_data = decrypted_first_part.into_inner();
+    /// decrypted_data.extend_from_slice(&decrypted_second_part.into_inner());
+    /// assert_eq!(decrypted_data, plaintext);
+    /// ``````
     pub fn aead_encrypt(
         &self,
+        iv: Option<&mut [u8]>,
         data: &[u8],
         authenticated_padding_info: &mut AuthenticatedCipherModeInfo,
     ) -> Result<Buffer> {
         let mut encrypted_len = MaybeUninit::<ULONG>::uninit();
+
+        let (iv_ptr, iv_len) = iv
+            .map(|iv| (iv.as_mut_ptr(), iv.len() as ULONG))
+            .unwrap_or((null_mut(), 0));
+
         let padding_info_box = authenticated_padding_info.as_box();
         let padding_info: *mut winapi::ctypes::c_void = Box::into_raw(padding_info_box) as *mut VOID;
         
@@ -603,8 +680,8 @@ impl SymmetricAlgorithmKey {
                 data.as_ptr() as PUCHAR,
                 data.len() as ULONG,
                 padding_info,
-                null_mut(),
-                0,
+                iv_ptr,
+                iv_len,
                 null_mut(),
                 0,
                 encrypted_len.as_mut_ptr(),
@@ -617,8 +694,8 @@ impl SymmetricAlgorithmKey {
                 data.as_ptr() as PUCHAR,
                 data.len() as ULONG,
                 padding_info,
-                null_mut(),
-                0,
+                iv_ptr,
+                iv_len,
                 output.as_mut_ptr(),
                 output.len() as ULONG,
                 encrypted_len.as_mut_ptr(),
@@ -627,7 +704,6 @@ impl SymmetricAlgorithmKey {
             .map(|_| output);
             
             authenticated_padding_info.update_from_raw(padding_info);
-            
             drop(Box::from_raw(padding_info));
             result
         }
@@ -707,12 +783,89 @@ impl SymmetricAlgorithmKey {
         }
     }
 
+    /// Decrypts data using the symmetric key
+    /// This function is used for AEAD ciphers [`ChainingMode::Gcm`]. Allows also chained calls.
+    /// 
+    /// 
+    /// The IV is only needed when doing chaned calls. If not doing chained calls, `None` should be used.
+    /// For chained calls input must be a multiple of the block size of the cipher. If the data lenght does not
+    /// match the block size of the cipher, make sure it is the final block of the data.
+    ///
+    /// # Examples
+    ///
+    /// 1. Encrypting and decrypting data using [`ChainingMode::Gcm`] in a single call:
+    /// ```
+    /// # use win_crypto_ng::symmetric::{ChainingMode, SymmetricAlgorithm, SymmetricAlgorithmId};
+    /// # use win_crypto_ng::symmetric::Padding;
+    /// # use win_crypto_ng::buffer::Buffer;
+    /// # use win_crypto_ng::helpers::AuthenticatedCipherModeInfo;
+    /// # let algo = SymmetricAlgorithm::open(SymmetricAlgorithmId::Aes, ChainingMode::Gcm).unwrap();
+    /// let key = algo.new_key("0123456789ABCDEF".as_bytes()).unwrap();
+    /// let mut iv = b"_THIS_IS_THE_IV_".to_vec();
+    /// let plaintext = "THIS_IS_THE_DATA".as_bytes();
+    /// let mut authenticated_padding_info = AuthenticatedCipherModeInfo::new(
+    ///    Buffer::from_vec(iv),
+    ///    Some(Buffer::from_vec(vec![0u8; 16])),
+    ///    None,
+    ///    false);
+    /// let ciphertext = key.aead_encrypt(None, plaintext, &mut authenticated_padding_info).unwrap();
+    /// let decrypted  = key.aead_decrypt(None, ciphertext.as_slice(), &mut authenticated_padding_info).unwrap();
+    /// 
+    /// assert_eq!(plaintext, decrypted.as_slice());
+    /// ```
+    /// 
+    /// 2. Encrypting and decrypting data using [`ChainingMode::Gcm`] in a chained call:
+    /// ```
+    /// # use winapi::shared::bcrypt::BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
+    /// # use win_crypto_ng::symmetric::{ChainingMode, SymmetricAlgorithm, SymmetricAlgorithmId};
+    /// # use win_crypto_ng::symmetric::Padding;
+    /// # use win_crypto_ng::buffer::Buffer;
+    /// # use win_crypto_ng::helpers::AuthenticatedCipherModeInfo;
+    /// let algo = SymmetricAlgorithm::open(SymmetricAlgorithmId::Aes, ChainingMode::Gcm).unwrap();
+    /// let key = algo.new_key("0123456789ABCDEF".as_bytes()).unwrap();
+    /// let iv = b"_THIS_IS_THE_IV_".to_vec();
+    /// let plaintext = "THIS_IS_THE_DATA___ALSO_THIS_IS_THE_DATA".as_bytes();
+    /// let mut authenticated_padding_info = AuthenticatedCipherModeInfo::new(
+    ///    Buffer::from_vec(iv.clone()),
+    ///    Some(Buffer::from_vec(vec![0u8; 16])),
+    ///    None,
+    ///    true);
+    /// 
+    /// // Track context iv (GCM updates iv on each call)
+    /// let mut context_iv = iv.clone();
+    /// 
+    /// let first_part = key.aead_encrypt(Some(context_iv.as_mut_slice()), &plaintext[0..16], &mut authenticated_padding_info).unwrap();
+    /// // Set this before the last call
+    /// authenticated_padding_info.flags &= !BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
+    /// let second_part = key.aead_encrypt(Some(context_iv.as_mut_slice()), &plaintext[16..], &mut authenticated_padding_info).unwrap();
+    ///
+    /// // We need the previous tag result to decrypt
+    /// let mut decrypt_authenticated_padding_info = AuthenticatedCipherModeInfo::new(
+    ///    Buffer::from_vec(iv.clone()),
+    ///    authenticated_padding_info.tag.clone(),
+    ///    None,
+    ///    true);
+    /// // Reset context to original iv
+    /// context_iv = iv.clone();
+    /// let decrypted_first_part  = key.aead_decrypt(Some(context_iv.as_mut_slice()), first_part.as_slice(), &mut decrypt_authenticated_padding_info).unwrap();
+    /// // Set this before the last call
+    /// decrypt_authenticated_padding_info.flags &= !BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
+    /// let decrypted_second_part  = key.aead_decrypt(Some(context_iv.as_mut_slice()), second_part.as_slice(), &mut decrypt_authenticated_padding_info).unwrap();
+    ///
+    /// // Join the decrypted data
+    /// let mut decrypted_data = decrypted_first_part.into_inner();
+    /// decrypted_data.extend_from_slice(&decrypted_second_part.into_inner());
+    /// assert_eq!(decrypted_data, plaintext);
+    /// ``````
     pub fn aead_decrypt(
         &self,
+        iv: Option<&mut [u8]>,
         data: &[u8],
-        authenticated_padding_info: &AuthenticatedCipherModeInfo,
+        authenticated_padding_info: &mut AuthenticatedCipherModeInfo,
     ) -> Result<Buffer> {
-
+        let (iv_ptr, iv_len) = iv
+            .map(|iv| (iv.as_mut_ptr(), iv.len() as ULONG))
+            .unwrap_or((null_mut(), 0));
         let mut plaintext_len = MaybeUninit::<ULONG>::uninit();
         let padding_info = Box::into_raw(authenticated_padding_info.as_box()) as *mut VOID;
         unsafe {
@@ -721,8 +874,8 @@ impl SymmetricAlgorithmKey {
                 data.as_ptr() as PUCHAR,
                 data.len() as ULONG,
                 null_mut(),
-                null_mut(),
-                0,
+                iv_ptr,
+                iv_len,
                 null_mut(),
                 0,
                 plaintext_len.as_mut_ptr(),
@@ -736,8 +889,8 @@ impl SymmetricAlgorithmKey {
                 data.as_ptr() as PUCHAR,
                 data.len() as ULONG,
                 padding_info,
-                null_mut(),
-                0,
+                iv_ptr,
+                iv_len,
                 output.as_mut_ptr(),
                 output.len() as ULONG,
                 plaintext_len.as_mut_ptr(),
@@ -745,6 +898,7 @@ impl SymmetricAlgorithmKey {
             ))
             .map(|_| output);
 
+            authenticated_padding_info.update_from_raw(padding_info);
             drop(Box::from_raw(padding_info));
 
             result
@@ -973,6 +1127,7 @@ mod block_cipher_trait {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     const SECRET: &'static str = "0123456789ABCDEF0123456789ABCDEF";
@@ -992,15 +1147,11 @@ mod tests {
         // Check specific Aes chaining modes
         let block_size = 16;
         let buffer = vec![0u8; 16];
-        let authenticated_padding_info = AuthenticatedCipherModeInfo {
-            nonce: Some(Buffer::from_vec(IV.as_bytes()[..block_size].to_vec())),
-            auth_data: None,
-            tag: Some(Buffer::from_vec(buffer)),
-            mac_context: None,
-            aad_size: 0,
-            data_size: 0,
-            flags: 0,
-        };
+        let authenticated_padding_info = AuthenticatedCipherModeInfo::new(
+            Buffer::from_vec(IV.as_bytes()[..block_size].to_vec()),
+            Some(Buffer::from_vec(buffer)),
+                None,
+            false);
         
         check_aead_encryption_decryption(
             SymmetricAlgorithmId::Aes,
@@ -1028,6 +1179,7 @@ mod tests {
         );
     }
 
+    
     #[test]
     fn aes_gcm_multiple_blocks() {
         // Check specific Aes chaining modes
@@ -1038,29 +1190,25 @@ mod tests {
             .get_property_unsized::<property::AuthTagLength>()
             .expect("Could not retrieve auth tag lenghts");
         println!("AuthTagLength: {:?}, {:?}", auth_tag_length.dwMinLength, auth_tag_length.dwMaxLength);
-        let tag_buffer = vec![0u8; auth_tag_length.dwMinLength as usize];
-        let mac_buffer = vec![0u8; auth_tag_length.dwMaxLength as usize];
-        println!("IV Buffer: {:?}", nonce_size);
 
-        let authenticated_padding_info = AuthenticatedCipherModeInfo {
-            nonce: Some(Buffer::from_vec(IV.as_bytes()[..nonce_size].to_vec())),
-            auth_data: None,
-            tag: Some(Buffer::from_vec(tag_buffer)),
-            mac_context:Some(Buffer::from_vec(mac_buffer)),
-            aad_size: 0,
-            data_size: 0,
-            flags: BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG,
-        };
+        let tag_buffer = vec![0u8; auth_tag_length.dwMinLength as usize];
+        let authenticated_padding_info = AuthenticatedCipherModeInfo::new(
+        Buffer::from_vec(IV.as_bytes()[..nonce_size].to_vec()),
+            Some(Buffer::from_vec(tag_buffer)),
+            None,
+            true
+        );
+
         check_multiple_aead_encryption_decryption(
             SymmetricAlgorithmId::Aes,
             ChainingMode::Gcm,
+            Some(IV.as_bytes()[..block_size].to_vec().as_mut_slice()),
             &SECRET.as_bytes()[..32],
             &EXTENDEDDATA.as_bytes(),
-            block_size,
             authenticated_padding_info,
-            EXTENDEDDATA.len() / 2,
+            EXTENDEDDATA.len() / 4,
         );
-    }
+    } 
 
     #[test]
     fn des() {
@@ -1167,15 +1315,14 @@ mod tests {
     ) {
         let algo = SymmetricAlgorithm::open(algo_id, chaining_mode).unwrap();
         let key = algo.new_key(secret).unwrap();
-        println!("{:?}", authenticated_padding_info);
-        let ciphertext = key.aead_encrypt( data, &mut authenticated_padding_info).unwrap();
+        let ciphertext = key.aead_encrypt( None, data, &mut authenticated_padding_info).unwrap();
         let plaintext: Buffer = key
             .aead_decrypt(
+                None,
                 ciphertext.as_slice(),
-                &authenticated_padding_info,
+                &mut authenticated_padding_info,
             )
             .unwrap();
-        println!("{:?}", authenticated_padding_info);
         assert_eq!(data, &plaintext.as_slice()[..data.len()]);
         assert_eq!(secret.len() * 8, key.key_size().unwrap());
         assert_eq!(expected_block_size, key.block_size().unwrap());
@@ -1184,40 +1331,48 @@ mod tests {
     fn check_multiple_aead_encryption_decryption(
         algo_id: SymmetricAlgorithmId,
         chaining_mode: ChainingMode,
+        iv: Option<&mut [u8]>,
         secret: &[u8],
         data: &[u8],
-        expected_block_size: usize,
         mut authenticated_padding_info: AuthenticatedCipherModeInfo,
         chunk_size: usize,
     ) {
         let algo = SymmetricAlgorithm::open(algo_id, chaining_mode).unwrap();
         let key = algo.new_key(secret).unwrap();
         println!("{:?}", authenticated_padding_info);
-        let splitted_data = data.chunks(chunk_size);
+        let mut splitted_data = data.chunks(chunk_size);
         let amount_of_chunks = splitted_data.len() - 1;
-        let current_chunk = 0;
+        let mut current_chunk = 0;
         let mut ciphertext = Vec::new();
-        for chunk in splitted_data.clone() {
+        let mut iv_copy = iv.as_ref().unwrap().to_vec();
+        println!("Complete data: {:?}", data);
+        while let Some(chunk) = splitted_data.next() {
             if current_chunk >= amount_of_chunks {
                 // Last chunk, turn off chaining mode
-                authenticated_padding_info.flags = 0;
+                authenticated_padding_info.flags &= !BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
             }
-            println!("Running chunk: {:?}. Chunk size: {:?}", current_chunk, chunk.len());
+            println!("Running chunk: {:?}. Chunk size: {:?}. Chunk: {:?}", current_chunk, chunk.len(), chunk);
             println!("{:?}", authenticated_padding_info);
-            let current_ciphertext = key.aead_encrypt(chunk, &mut authenticated_padding_info).unwrap();
+            let current_ciphertext = key.aead_encrypt(Some(iv_copy.as_mut_slice()), chunk, &mut authenticated_padding_info).unwrap();
             ciphertext.extend_from_slice(current_ciphertext.as_slice());
             println!("Chunk {:?} done", current_chunk);
+            current_chunk += 1;
         }
+        
+        // Restore the original nonce
+        println!("Padding info: {:?}", authenticated_padding_info);
+        //authenticated_padding_info.nonce = Buffer::from_vec(iv.as_ref().unwrap().to_vec());
         let plaintext: Buffer = key
             .aead_decrypt(
+                None, 
                 ciphertext.as_slice(),
-                &authenticated_padding_info,
+                &mut authenticated_padding_info,
             )
             .unwrap();
         println!("{:?}", authenticated_padding_info);
         assert_eq!(data, &plaintext.as_slice()[..data.len()]);
         assert_eq!(secret.len() * 8, key.key_size().unwrap());
-        assert_eq!(expected_block_size, key.block_size().unwrap());
+        assert_eq!(16, key.block_size().unwrap());
     }
 
     #[cfg(feature = "block-cipher")]

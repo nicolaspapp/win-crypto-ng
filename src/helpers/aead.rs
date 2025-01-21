@@ -7,7 +7,7 @@ use crate::buffer::Buffer;
 
 #[derive(Debug, PartialOrd, PartialEq, Clone)]
 pub struct AuthenticatedCipherModeInfo {
-    pub nonce: Option<Buffer>,
+    pub nonce: Buffer,
     pub auth_data: Option<Buffer>,
     pub tag: Option<Buffer>,
     pub mac_context: Option<Buffer>,
@@ -17,35 +17,56 @@ pub struct AuthenticatedCipherModeInfo {
 }
 
 impl AuthenticatedCipherModeInfo {
-    pub fn to_bcrypt_struct(&self) -> BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
+    pub fn new(
+        nonce: Buffer,
+        tag: Option<Buffer>,
+        auth_data: Option<Buffer>,
+        is_chained: bool,
+    ) -> Self {
+        let mut flags = 0;
+        let mut mac_context: Option<Buffer> = None;
+        if is_chained {
+            flags |= BCRYPT_AUTH_MODE_CHAIN_CALLS_FLAG;
+            mac_context = Some(Buffer::from_vec(vec![0u8; 16]));
+        }
+        
+        Self {
+            nonce: nonce,
+            auth_data: auth_data,
+            tag: tag,
+            mac_context: mac_context,
+            aad_size: 0,
+            data_size: 0,
+            flags: flags,
+        }
+    }
+
+
+    pub fn to_bcrypt_struct(&mut self) -> BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
         BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO {
             cbSize: std::mem::size_of::<BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO>() as u32,
             dwInfoVersion: BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO_VERSION,
-            pbNonce: self.nonce.as_ref().map_or(null_mut(), |v| v.as_ptr() as PUCHAR),
-            cbNonce: self.nonce.as_ref().map_or(0, |v| v.len() as ULONG),
-            pbAuthData: self.auth_data.as_ref().map_or(null_mut(), |v| v.as_ptr() as PUCHAR),
-            cbAuthData: self.auth_data.as_ref().map_or(0, |v| v.len() as ULONG),
-            pbTag:  self.tag.as_ref().map_or(null_mut(), |v| v.as_ptr() as PUCHAR),
-            cbTag: self.tag.as_ref().map_or(0, |v| v.len() as ULONG),
-            pbMacContext: self.mac_context.as_ref().map_or(null_mut(), |v| v.as_ptr() as PUCHAR),
-            cbMacContext: self.mac_context.as_ref().map_or(0, |v| v.len() as ULONG),
+            pbNonce: self.nonce.as_mut_ptr() as PUCHAR,
+            cbNonce: self.nonce.len() as ULONG,
+            pbAuthData: self.auth_data.as_mut().map_or(null_mut(), |v| v.as_mut_ptr() as PUCHAR),
+            cbAuthData: self.auth_data.as_mut().map_or(0, |v| v.len() as ULONG),
+            pbTag:  self.tag.as_mut().map_or(null_mut(), |v| v.as_mut_ptr() as PUCHAR),
+            cbTag: self.tag.as_mut().map_or(0, |v| v.len() as ULONG),
+            pbMacContext: self.mac_context.as_mut().map_or(null_mut(), |v| v.as_mut_ptr() as PUCHAR),
+            cbMacContext: self.mac_context.as_mut().map_or(0, |v| v.len() as ULONG),
             cbAAD: self.aad_size,
             cbData: self.data_size,
             dwFlags: self.flags,
         }
     }
 
-    pub fn as_box(&self) -> Box<BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO> {
+    pub fn as_box(&mut self) -> Box<BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO> {
         return Box::new(self.to_bcrypt_struct())
     }
 
     pub fn from_boxed(&self, bcrypt_info: Box<BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO>) -> Self {
         Self {
-            nonce: if bcrypt_info.pbNonce.is_null() {
-                None
-            } else {
-                Some(Buffer::from(unsafe { std::slice::from_raw_parts(bcrypt_info.pbNonce as *const u8, bcrypt_info.cbNonce as usize) }))
-            },
+            nonce: Buffer::from(unsafe { std::slice::from_raw_parts(bcrypt_info.pbNonce as *const u8, bcrypt_info.cbNonce as usize) }),
             auth_data: if bcrypt_info.pbAuthData.is_null() {
                 None
             } else {
